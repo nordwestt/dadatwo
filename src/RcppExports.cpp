@@ -256,6 +256,57 @@ BEGIN_RCPP
     return rcpp_result_gen;
 END_RCPP
 }
+// C_assign_taxonomy_prepared
+Rcpp::List C_assign_taxonomy_prepared(std::vector<std::string> seqs, std::vector<std::string> rcs, SEXP lgk_xp, Rcpp::IntegerMatrix genusmat, bool try_rc);
+RcppExport SEXP _dada2_C_assign_taxonomy_prepared(SEXP seqsSEXP, SEXP rcsSEXP, SEXP lgk_xpSEXP, SEXP genusmatSEXP, SEXP try_rcSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< std::vector<std::string> >::type seqs(seqsSEXP);
+    Rcpp::traits::input_parameter< std::vector<std::string> >::type rcs(rcsSEXP);
+    Rcpp::traits::input_parameter< SEXP >::type lgk_xp(lgk_xpSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerMatrix >::type genusmat(genusmatSEXP);
+    Rcpp::traits::input_parameter< bool >::type try_rc(try_rcSEXP);
+    rcpp_result_gen = Rcpp::wrap(C_assign_taxonomy_prepared(seqs, rcs, lgk_xp, genusmat, try_rc));
+    return rcpp_result_gen;
+END_RCPP
+}
+// C_build_taxonomy_ref_file
+void C_build_taxonomy_ref_file(std::vector<std::string> refs, std::vector<int> ref_to_genus, Rcpp::IntegerMatrix genusmat, std::string bin_file, bool verbose);
+RcppExport SEXP _dada2_C_build_taxonomy_ref_file(SEXP refsSEXP, SEXP ref_to_genusSEXP, SEXP genusmatSEXP, SEXP bin_fileSEXP, SEXP verboseSEXP) {
+BEGIN_RCPP
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< std::vector<std::string> >::type refs(refsSEXP);
+    Rcpp::traits::input_parameter< std::vector<int> >::type ref_to_genus(ref_to_genusSEXP);
+    Rcpp::traits::input_parameter< Rcpp::IntegerMatrix >::type genusmat(genusmatSEXP);
+    Rcpp::traits::input_parameter< std::string >::type bin_file(bin_fileSEXP);
+    Rcpp::traits::input_parameter< bool >::type verbose(verboseSEXP);
+    C_build_taxonomy_ref_file(refs, ref_to_genus, genusmat, bin_file, verbose);
+    return R_NilValue;
+END_RCPP
+}
+// C_load_taxonomy_ref_file
+SEXP C_load_taxonomy_ref_file(std::string bin_file, size_t ngenus);
+RcppExport SEXP _dada2_C_load_taxonomy_ref_file(SEXP bin_fileSEXP, SEXP ngenusSEXP) {
+BEGIN_RCPP
+    Rcpp::RObject rcpp_result_gen;
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< std::string >::type bin_file(bin_fileSEXP);
+    Rcpp::traits::input_parameter< size_t >::type ngenus(ngenusSEXP);
+    rcpp_result_gen = Rcpp::wrap(C_load_taxonomy_ref_file(bin_file, ngenus));
+    return rcpp_result_gen;
+END_RCPP
+}
+// C_release_taxonomy_ref
+void C_release_taxonomy_ref(SEXP lgk_xp);
+RcppExport SEXP _dada2_C_release_taxonomy_ref(SEXP lgk_xpSEXP) {
+BEGIN_RCPP
+    Rcpp::RNGScope rcpp_rngScope_gen;
+    Rcpp::traits::input_parameter< SEXP >::type lgk_xp(lgk_xpSEXP);
+    C_release_taxonomy_ref(lgk_xp);
+    return R_NilValue;
+END_RCPP
+}
 
 // validate (ensure exported C++ functions exist before calling them)
 static int _dada2_RcppExport_validate(const char* sig) { 
@@ -287,6 +338,10 @@ static const R_CallMethodDef CallEntries[] = {
     {"_dada2_C_matrixEE", (DL_FUNC) &_dada2_C_matrixEE, 1},
     {"_dada2_C_nwvec", (DL_FUNC) &_dada2_C_nwvec, 7},
     {"_dada2_C_assign_taxonomy2", (DL_FUNC) &_dada2_C_assign_taxonomy2, 7},
+    {"_dada2_C_assign_taxonomy_prepared", (DL_FUNC) &_dada2_C_assign_taxonomy_prepared, 5},
+    {"_dada2_C_build_taxonomy_ref_file", (DL_FUNC) &_dada2_C_build_taxonomy_ref_file, 5},
+    {"_dada2_C_load_taxonomy_ref_file", (DL_FUNC) &_dada2_C_load_taxonomy_ref_file, 2},
+    {"_dada2_C_release_taxonomy_ref", (DL_FUNC) &_dada2_C_release_taxonomy_ref, 1},
     {"_dada2_RcppExport_registerCCallable", (DL_FUNC) &_dada2_RcppExport_registerCCallable, 0},
     {NULL, NULL, 0}
 };

@@ -65,14 +65,88 @@
 assignTaxonomy <- function(seqs, refFasta, minBoot=50, tryRC=FALSE, outputBootstraps=FALSE,
                            taxLevels=c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
                            multithread=FALSE, verbose=FALSE) {
-  MIN_REF_LEN <- 20 # Enforced minimum length of reference seqs. Must be bigger than the kmer-size used (8).
-  MIN_TAX_LEN <- 50 # Minimum length of input sequences to get a taxonomic assignment
-  # Get character vector of sequences
   seqs <- getSequences(seqs)
-  if(min(nchar(seqs)) < MIN_TAX_LEN) {
-    warning("Some sequences were shorter than ", MIN_TAX_LEN, " nts and will not receive a taxonomic classification.")
+  n <- length(seqs)
+  batch_size <- 5000L
+  if(n > batch_size) {
+    if(verbose) {
+      cat("assignTaxonomy: processing", n, "sequences in batches of", batch_size, "\n")
+    }
+    breaks <- split(seq_len(n), ceiling(seq_along(seqs) / batch_size))
+    results <- vector("list", length(breaks))
+    for(i in seq_along(breaks)) {
+      if(verbose) {
+        cat("  batch ", i, " of ", length(breaks), " (", length(breaks[[i]]), " seqs)\n", sep="")
+      }
+      results[[i]] <- .assignTaxonomyOnce(seqs[breaks[[i]]], refFasta, minBoot, tryRC,
+                                          outputBootstraps, taxLevels, multithread, FALSE)
+    }
+    if(is.list(results[[1]]) && "taxa" %in% names(results[[1]])) {
+      tax.out <- do.call(rbind, lapply(results, `[[`, "taxa"))
+      boot.out <- do.call(rbind, lapply(results, `[[`, "boot"))
+      return(list(taxa=tax.out, boot=boot.out))
+    }
+    return(do.call(rbind, results))
   }
-  # Read in the reference fasta
+  .assignTaxonomyOnce(seqs, refFasta, minBoot, tryRC, outputBootstraps, taxLevels, multithread, verbose)
+}
+
+.assignTaxonomyOnce <- function(seqs, refFasta, minBoot, tryRC, outputBootstraps, taxLevels, multithread, verbose) {
+  ref <- .getOrBuildTaxonomyRef(refFasta, verbose=verbose)
+  .assignTaxonomyCore(seqs=seqs, ref=ref, minBoot=minBoot, tryRC=tryRC,
+                      outputBootstraps=outputBootstraps, taxLevels=taxLevels,
+                      multithread=multithread, verbose=verbose)
+}
+
+.getOrBuildTaxonomyRef <- function(refFasta, verbose=FALSE) {
+  if(is.character(refFasta) && length(refFasta) == 1L && file.exists(refFasta)) {
+    fp <- .taxonomyRefFingerprint(refFasta)
+    cache_base <- file.path(.taxonomyCacheDir(), .taxonomyRefCacheId(fp))
+    paths <- .taxonomyRefPaths(cache_base)
+    if(file.exists(paths$meta) && file.exists(paths$bin)) {
+      ref <- readRDS(paths$meta)
+      if(is.list(ref$fingerprint) && identical(ref$fingerprint, fp)) {
+        if(verbose) cat("Using cached taxonomy reference.\n")
+        return(ref)
+      }
+    }
+    if(verbose) cat("Building taxonomy reference cache...\n")
+    parsed <- .parseTaxonomyTrainingFasta(refFasta, verbose=verbose)
+    dir.create(dirname(paths$bin), recursive=TRUE, showWarnings=FALSE)
+    C_build_taxonomy_ref_file(parsed$refs, parsed$ref.to.genus, parsed$tax.mat.int, paths$bin, verbose)
+    ref <- .makeTaxonomyRef(parsed, paths$bin, paths$meta, source=refFasta, fingerprint=fp)
+    saveRDS(ref, paths$meta)
+    if(verbose) {
+      cat("  Cached classifier rows:", ref$ngenus, "\n")
+      cat("  Cache directory:", .taxonomyCacheDir(), "\n")
+    }
+    return(ref)
+  }
+  parsed <- .parseTaxonomyTrainingFasta(refFasta, verbose=verbose)
+  parsed$from_fasta <- TRUE
+  parsed
+}
+
+.taxonomyCacheDir <- function() {
+  file.path(tools::R_user_dir("dada2", which="cache"), "taxonomy-ref")
+}
+
+.taxonomyRefFingerprint <- function(refFasta) {
+  info <- file.info(refFasta)
+  list(path=normalizePath(refFasta, mustWork=TRUE), size=info$size, mtime=info$mtime)
+}
+
+.taxonomyRefCacheId <- function(fp) {
+  key <- paste(fp$path, fp$size, fp$mtime, sep="\1")
+  f <- tempfile()
+  on.exit(unlink(f), add=TRUE)
+  writeBin(charToRaw(key), f)
+  as.character(tools::md5sum(f))
+}
+
+# Parse training fasta headers and reference sequences for assignTaxonomy
+.parseTaxonomyTrainingFasta <- function(refFasta, verbose=FALSE) {
+  MIN_REF_LEN <- 20
   refsr <- readFasta(refFasta)
   lens <- width(sread(refsr))
   if(any(lens<MIN_REF_LEN)) {
@@ -81,18 +155,14 @@ assignTaxonomy <- function(seqs, refFasta, minBoot=50, tryRC=FALSE, outputBootst
   }
   refs <- as.character(sread(refsr))
   tax <- as.character(id(refsr))
-  tax <- sapply(tax, function(x) gsub("^\\s+|\\s+$", "", x)) # Remove leading/trailing whitespace
-  # Sniff and parse UNITE fasta format
-  UNITE <- FALSE
-  if(all(grepl("FU\\|re[pf]s", tax[1:10]))) {
-    UNITE <- TRUE
-    cat("UNITE fungal taxonomic reference detected.\n")
-    tax <- sapply(strsplit(tax, "\\|"), `[`, 5)
+  tax <- vapply(tax, function(x) gsub("^\\s+|\\s+$", "", x), character(1))
+  if(length(tax) >= 10 && all(grepl("FU\\|re[pf]s", tax[1:10]))) {
+    if(verbose) cat("UNITE fungal taxonomic reference detected.\n")
+    tax <- vapply(strsplit(tax, "\\|"), function(x) x[[5]], character(1))
     tax <- gsub("[pcofg]__unidentified;", "_DADA2_UNSPECIFIED;", tax)
     tax <- gsub(";s__(\\w+)_", ";s__", tax)
     tax <- gsub(";s__sp$", ";_DADA2_UNSPECIFIED", tax)
   }
-  # Crude format check
   if(!grepl(";", tax[[1]])) {
     if(length(unlist(strsplit(tax[[1]], "\\s")))==3) {
       stop("Incorrect reference file format for assignTaxonomy (this looks like a file formatted for assignSpecies).")
@@ -100,66 +170,117 @@ assignTaxonomy <- function(seqs, refFasta, minBoot=50, tryRC=FALSE, outputBootst
       stop("Incorrect reference file format for assignTaxonomy.")
     }
   }
-  # Parse the taxonomies from the id string
-  tax.depth <- sapply(strsplit(tax, ";"), length)
+  tax.depth <- vapply(strsplit(tax, ";"), length, integer(1))
   td <- max(tax.depth)
-  for(i in seq(length(tax))) {
+  for(i in seq_along(tax)) {
     if(tax.depth[[i]] < td) {
-      for(j in seq(td - tax.depth[[i]])) {
+      for(j in seq_len(td - tax.depth[[i]])) {
         tax[[i]] <- paste0(tax[[i]], "_DADA2_UNSPECIFIED;")
       }
     }
   }
-  # Create the integer maps from reference to type ("genus") and for each tax level
   genus.unq <- unique(tax)
   ref.to.genus <- match(tax, genus.unq)
   tax.mat <- matrix(unlist(strsplit(genus.unq, ";")), ncol=td, byrow=TRUE)
   tax.df <- as.data.frame(tax.mat)
-  for(i in seq(ncol(tax.df))) {
-    tax.df[,i] <- factor(tax.df[,i])
-    tax.df[,i] <- as.integer(tax.df[,i])
+  for(i in seq_len(ncol(tax.df))) {
+    tax.df[[i]] <- factor(tax.df[[i]])
+    tax.df[[i]] <- as.integer(tax.df[[i]])
   }
   tax.mat.int <- as.matrix(tax.df)
-  ### Assign
-  # Parse multithreading argument
+  list(refs=refs, genus.unq=genus.unq, ref.to.genus=ref.to.genus, tax.mat.int=tax.mat.int, td=td)
+}
+
+.taxonomyRefPaths <- function(cacheFile) {
+  base <- sub("\\.rds$", "", cacheFile, ignore.case=TRUE)
+  list(meta=paste0(base, ".rds"), bin=paste0(base, ".bin"))
+}
+
+.makeTaxonomyRef <- function(parsed, bin, meta, source=NA_character_, fingerprint=NULL) {
+  structure(list(
+    version=1L,
+    genus.unq=parsed$genus.unq,
+    tax.mat.int=parsed$tax.mat.int,
+    td=parsed$td,
+    ngenus=nrow(parsed$tax.mat.int),
+    n_kmers=65536L,
+    k=8L,
+    bin=bin,
+    meta=meta,
+    source=source,
+    fingerprint=fingerprint
+  ), class="TaxonomyRef")
+}
+
+.getTaxonomyLgkPtr <- function(ref) {
+  key <- ref$bin
+  if(!exists(key, envir=.taxonomyRefCache, inherits=FALSE)) {
+    assign(key, C_load_taxonomy_ref_file(ref$bin, ref$ngenus), envir=.taxonomyRefCache)
+  }
+  get(key, envir=.taxonomyRefCache, inherits=FALSE)
+}
+
+.taxonomyRefCache <- new.env(parent=emptyenv())
+
+.assignTaxonomyCore <- function(seqs, ref, minBoot=50, tryRC=FALSE, outputBootstraps=FALSE,
+                               taxLevels=c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species"),
+                               multithread=FALSE, verbose=FALSE) {
+  MIN_TAX_LEN <- 50
+  seqs <- getSequences(seqs)
+  if(length(seqs) > 0 && min(nchar(seqs)) < MIN_TAX_LEN) {
+    warning("Some sequences were shorter than ", MIN_TAX_LEN, " nts and will not receive a taxonomic classification.")
+  }
+  genus.unq <- ref$genus.unq
+  tax.mat.int <- ref$tax.mat.int
+  td <- ref$td
+  .setTaxonomyThreads(multithread)
+  rcs <- if(tryRC) rc(seqs) else character(0)
+  if(inherits(ref, "TaxonomyRef")) {
+    lgk_ptr <- .getTaxonomyLgkPtr(ref)
+    assignment <- C_assign_taxonomy_prepared(seqs, rcs, lgk_ptr, tax.mat.int, tryRC)
+  } else if(isTRUE(ref$from_fasta)) {
+    assignment <- C_assign_taxonomy2(seqs, rcs, ref$refs, ref$ref.to.genus, tax.mat.int, tryRC, verbose)
+  } else {
+    stop("Invalid taxonomy reference.")
+  }
+  .formatTaxonomyAssignment(seqs, assignment, genus.unq, td, minBoot, outputBootstraps, taxLevels)
+}
+
+.setTaxonomyThreads <- function(multithread) {
   if(is.logical(multithread)) {
-    if(multithread==TRUE) { RcppParallel::setThreadOptions(numThreads = "auto") }
-    else { RcppParallel::setThreadOptions(numThreads = 1) }
+    if(multithread==TRUE) RcppParallel::setThreadOptions(numThreads = "auto")
+    else RcppParallel::setThreadOptions(numThreads = 1)
   } else if(is.numeric(multithread)) {
     RcppParallel::setThreadOptions(numThreads = multithread)
   } else {
     warning("Invalid multithread parameter. Running as a single thread.")
     RcppParallel::setThreadOptions(numThreads = 1)
   }
-  # Run C assignemnt code
-  rcs <- if(tryRC) rc(seqs) else character(0)
-  assignment <- C_assign_taxonomy2(seqs, rcs, refs, ref.to.genus, tax.mat.int, tryRC, verbose)
-  # Parse results and return tax consistent with minBoot
+}
+
+.formatTaxonomyAssignment <- function(seqs, assignment, genus.unq, td, minBoot, outputBootstraps, taxLevels) {
   bestHit <- genus.unq[assignment$tax]
   boots <- assignment$boot
   taxes <- strsplit(bestHit, ";")
   taxes <- lapply(seq_along(taxes), function(i) taxes[[i]][boots[i,]>=minBoot])
-  # Convert to character matrix
   tax.out <- matrix(NA_character_, nrow=length(seqs), ncol=td)
-  for(i in seq(length(seqs))) {
+  for(i in seq_along(seqs)) {
     if(length(taxes[[i]]) > 0) {
-      tax.out[i,1:length(taxes[[i]])] <- taxes[[i]]
+      tax.out[i, seq_along(taxes[[i]])] <- taxes[[i]]
     }
   }
   rownames(tax.out) <- seqs
-  colnames(tax.out) <- taxLevels[1:ncol(tax.out)]
+  colnames(tax.out) <- taxLevels[seq_len(ncol(tax.out))]
   tax.out[tax.out=="_DADA2_UNSPECIFIED"] <- NA_character_
-  if(outputBootstraps){
-      # Convert boots to integer matrix
-      boots.out <- matrix(boots, nrow=length(seqs), ncol=td)
-      rownames(boots.out) <- seqs
-      colnames(boots.out) <- taxLevels[1:ncol(boots.out)]
-      list(tax=tax.out, boot=boots.out)
+  if(outputBootstraps) {
+    boots.out <- matrix(boots, nrow=length(seqs), ncol=td)
+    rownames(boots.out) <- seqs
+    colnames(boots.out) <- taxLevels[seq_len(ncol(boots.out))]
+    list(taxa=tax.out, boot=boots.out)
   } else {
     tax.out
   }
 }
-
 # Helper function for assignSpecies
 mapHits <- function(x, refs, keep, sep="/") {
   hits <- refs[x]

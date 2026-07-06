@@ -65,6 +65,22 @@ C_assign_taxonomy2 <- function(seqs, rcs, refs, ref_to_genus, genusmat, try_rc, 
     .Call('_dada2_C_assign_taxonomy2', PACKAGE = 'dada2', seqs, rcs, refs, ref_to_genus, genusmat, try_rc, verbose)
 }
 
+C_assign_taxonomy_prepared <- function(seqs, rcs, lgk_xp, genusmat, try_rc) {
+    .Call('_dada2_C_assign_taxonomy_prepared', PACKAGE = 'dada2', seqs, rcs, lgk_xp, genusmat, try_rc)
+}
+
+C_build_taxonomy_ref_file <- function(refs, ref_to_genus, genusmat, bin_file, verbose) {
+    invisible(.Call('_dada2_C_build_taxonomy_ref_file', PACKAGE = 'dada2', refs, ref_to_genus, genusmat, bin_file, verbose))
+}
+
+C_load_taxonomy_ref_file <- function(bin_file, ngenus) {
+    .Call('_dada2_C_load_taxonomy_ref_file', PACKAGE = 'dada2', bin_file, ngenus)
+}
+
+C_release_taxonomy_ref <- function(lgk_xp) {
+    invisible(.Call('_dada2_C_release_taxonomy_ref', PACKAGE = 'dada2', lgk_xp))
+}
+
 # Register entry points for exported C++ functions
 methods::setLoadAction(function(ns) {
     .Call('_dada2_RcppExport_registerCCallable', PACKAGE = 'dada2')

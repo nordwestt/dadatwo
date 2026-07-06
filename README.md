@@ -26,6 +26,54 @@ The [dada2 R package manual](https://www.bioconductor.org/packages/3.6/bioc/manu
 
 Further documentation is available on [the DADA2 front page](http://benjjneb.github.io/dada2/). 
 
+### Efficient taxonomy assignment (`assignTaxonomy`)
+
+Large projects (many ASVs × full Silva/RDP training databases) can use tens of gigabytes of RAM and run for minutes because the naive Bayesian classifier builds a large kmer probability matrix. The same `assignTaxonomy()` call as before is now faster and more memory-friendly:
+
+- **Automatic reference caching** — for a training fasta path on disk, the classifier matrix is built once and stored under `tools::R_user_dir("dada2", which="cache")/taxonomy-ref`. Later calls with the same file reuse the cache (set `verbose=TRUE` to see cache hits).
+- **Automatic batching** — query sets larger than 5000 sequences are processed in chunks to cap peak memory.
+- **Memory-mapped classifier storage** on Linux/macOS so the cached matrix is not fully duplicated in RAM.
+
+#### Example (unchanged API)
+
+```r
+library(dada2)
+
+asv <- getSequences(seqtab)   # character vector of ASV sequences
+taxa <- assignTaxonomy(asv, "silva_nr99_v138.1_train_set.fa.gz", multithread = TRUE)
+
+# Second call with the same training file is faster (uses disk cache)
+taxa2 <- assignTaxonomy(other_asvs, "silva_nr99_v138.1_train_set.fa.gz",
+                        multithread = TRUE, verbose = TRUE)
+```
+
+#### Memory and runtime tips
+
+| Tip | Why |
+|-----|-----|
+| Reuse the same training fasta path | Enables automatic disk cache across runs and R sessions |
+| Use genus-level training fastas | Fewer unique taxonomy strings → much smaller matrix (see [training sets](https://benjjneb.github.io/dada2/training.html)) |
+| Keep `tryRC = FALSE` unless needed | Skips reverse-complement extraction |
+| Run heavy jobs outside RStudio | Plain `Rscript` avoids IDE memory overhead and crashes |
+| Call `gc()` after taxonomy | Release reference strings before downstream steps |
+
+Approximate classifier matrix size: **unique taxonomy strings × 0.25 MB**. Example: 80,000 taxonomies ≈ 20 GB on disk (memory-mapped at assignment time).
+
+#### Benchmarking
+
+```bash
+# Quick stress test (~default 100 queries, 5000 genera)
+Rscript inst/benchmark/benchmark_assignTaxonomy.R --queries 100 --genera 5000
+
+# Longer run (~2 minutes; auto-calibrates query count)
+Rscript inst/benchmark/benchmark_assignTaxonomy.R --target-secs 120 --genera 5000
+
+# Heavier load: more queries and/or genera
+Rscript inst/benchmark/benchmark_assignTaxonomy.R --queries 1200 --genera 5000
+```
+
+Runtime scales roughly linearly with `--queries` and `--genera`.
+
 ### DADA2 Articles
 
 [DADA2: High resolution sample inference from Illumina amplicon data. Nature Methods, 2016.](http://dx.doi.org/10.1038/nmeth.3869) [(Open Access link.)](http://rdcu.be/ipGh)

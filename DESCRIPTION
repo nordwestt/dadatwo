@@ -56,4 +56,4 @@ Collate:
     'sequenceIO.R'
     'show-methods.R'
     'taxonomy.R'
-RoxygenNote: 7.3.1
+Config/roxygen2/version: 8.0.0
