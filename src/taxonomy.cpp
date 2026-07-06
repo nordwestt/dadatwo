@@ -3,9 +3,69 @@
 #include <RcppParallel.h>
 #include <random>
 #include <algorithm>
+#include <cstring>
 #define NBOOT 100
   
 using namespace Rcpp;
+
+#ifdef __x86_64
+#include <cpuid.h>
+#include <emmintrin.h>
+#include <immintrin.h>
+
+static bool tax_cpu_has_avx2() {
+  static int cached = -1;
+  if(cached >= 0) return cached != 0;
+  unsigned int eax, ebx, ecx, edx;
+  if(__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx)) {
+    cached = (ebx & (1u << 5)) ? 1 : 0;
+  } else {
+    cached = 0;
+  }
+  return cached != 0;
+}
+
+static inline void add_row_avx2(float *scores, const float *row, size_t ngenus) {
+  size_t g = 0;
+  for(; g + 8 <= ngenus; g += 8) {
+    __m256 s = _mm256_loadu_ps(&scores[g]);
+    __m256 r = _mm256_loadu_ps(&row[g]);
+    _mm256_storeu_ps(&scores[g], _mm256_add_ps(s, r));
+  }
+  for(; g + 4 <= ngenus; g += 4) {
+    __m128 s = _mm_loadu_ps(&scores[g]);
+    __m128 r = _mm_loadu_ps(&row[g]);
+    _mm_storeu_ps(&scores[g], _mm_add_ps(s, r));
+  }
+  for(; g < ngenus; g++) scores[g] += row[g];
+}
+#endif
+
+static inline void add_row_sse2(float *scores, const float *row, size_t ngenus) {
+#ifdef __x86_64
+  size_t g = 0;
+  for(; g + 4 <= ngenus; g += 4) {
+    __m128 s = _mm_loadu_ps(&scores[g]);
+    __m128 r = _mm_loadu_ps(&row[g]);
+    _mm_storeu_ps(&scores[g], _mm_add_ps(s, r));
+  }
+  for(; g < ngenus; g++) scores[g] += row[g];
+#else
+  for(size_t g = 0; g < ngenus; g++) scores[g] += row[g];
+#endif
+}
+
+static inline void add_contrib_row(float *scores, const float *row, size_t ngenus) {
+#ifdef __x86_64
+  if(tax_cpu_has_avx2()) {
+    add_row_avx2(scores, row, ngenus);
+  } else {
+    add_row_sse2(scores, row, ngenus);
+  }
+#else
+  add_row_sse2(scores, row, ngenus);
+#endif
+}
 
 // Returns 0-3 for ACGT, -1 otherwise
 static inline int tax_nti(char c) {
@@ -16,8 +76,6 @@ static inline int tax_nti(char c) {
   return -1;
 }
 
-// Gets kmer index
-// Returns -1 if non-ACGT base encountered
 int tax_kmer(const char *seq, unsigned int k) {
   unsigned int j, nti;
   int kmer=0;
@@ -33,25 +91,22 @@ int tax_kmer(const char *seq, unsigned int k) {
   return(kmer);
 }
 
-// Sets to 1 (TRUE) the value of kvec corresponding to each valid kmer index in the provided sequence
 void tax_kvec(const char *seq, unsigned int k, unsigned char *kvec) {
   unsigned int i;
   unsigned int len = strlen(seq);
-  size_t klen = len - k + 1; // The number of kmers in this sequence
+  size_t klen = len - k + 1;
   int kmer = 0;
-  size_t n_kmers = (1 << (2*k));  // 4^k kmers
-  for(i=0;i<n_kmers;i++) { kvec[i] = 0; }
+  size_t n_kmers = (1 << (2*k));
+  memset(kvec, 0, n_kmers * sizeof(unsigned char));
 
   for(i=0; i<klen; i++) {
     kmer = tax_kmer(&seq[i], k);
-    
     if(kmer>=0 && kmer<n_kmers) {
       kvec[kmer] = 1;
     }
   }
 }
 
-// Writes all valid (>=0) kmer indices in the provided sequence to karray. Returns number written.
 unsigned int tax_karray(const char *seq, unsigned int k, int *karray) {
   unsigned int len = strlen(seq);
   if(len < k) return 0;
@@ -77,12 +132,10 @@ unsigned int tax_karray(const char *seq, unsigned int k, int *karray) {
       karray[j++] = kmer;
     }
   }
-  // Sort for sequential lgk_v access within each genus row (cache-friendly scoring).
   std::sort(karray, karray + j);
   return(j);
 }
 
-// Score one genus row; sorted karray enables prefetch-friendly sequential reads in lgk_v.
 static inline float score_genus_row(const float *lgk_v, const int *karray, unsigned int arraylen, float max_logp) {
   float logp = 0.0f;
   unsigned int pos = 0;
@@ -135,6 +188,50 @@ int get_best_genus(int *karray, float *out_logp, unsigned int arraylen, unsigned
   return max_g;
 }
 
+// contrib layout: contrib[pos * ngenus + g] = log prob of kmer at karray[pos] for genus g
+static void build_contrib(float *contrib, const int *karray, unsigned int arraylen,
+                          unsigned int n_kmers, unsigned int ngenus, float *lgk_probability) {
+  for(unsigned int pos = 0; pos < arraylen; pos++) {
+    int kmer = karray[pos];
+    float *out = contrib + ((size_t)pos * ngenus);
+    for(unsigned int g = 0; g < ngenus; g++) {
+      out[g] = lgk_probability[((size_t)g * n_kmers) + kmer];
+    }
+  }
+}
+
+static int argmax_scores(float *scores, unsigned int ngenus, std::mt19937& gen, float *out_logp) {
+  int max_g = -1;
+  float max_logp = -FLT_MAX;
+  unsigned int nmax = 0;
+  std::uniform_real_distribution<> cunif(0.0, 1.0);
+
+  for(unsigned int g = 0; g < ngenus; g++) {
+    float logp = scores[g];
+    if(max_logp > 0 || logp > max_logp) {
+      max_logp = logp;
+      max_g = (int)g;
+      nmax = 1;
+    } else if(max_logp == logp) {
+      nmax++;
+      if((double)cunif(gen) < 1.0/nmax) {
+        max_g = (int)g;
+      }
+    }
+  }
+  *out_logp = max_logp;
+  return max_g;
+}
+
+static int score_boot_contrib(float *contrib, int *bootpos, unsigned int bootlen,
+                              unsigned int ngenus, float *scores, std::mt19937& gen, float *out_logp) {
+  memset(scores, 0, ((size_t)ngenus) * sizeof(float));
+  for(unsigned int i = 0; i < bootlen; i++) {
+    add_contrib_row(scores, contrib + ((size_t)bootpos[i] * ngenus), ngenus);
+  }
+  return argmax_scores(scores, ngenus, gen, out_logp);
+}
+
 
 struct AssignParallel : public RcppParallel::Worker
 {
@@ -151,25 +248,42 @@ struct AssignParallel : public RcppParallel::Worker
   size_t n_kmers;
   size_t ngenus, nlevel;
   unsigned int max_arraylen;
+  size_t max_contrib;
   bool try_rc;
   
   AssignParallel(std::vector<std::string> seqs, std::vector<std::string> rcs, float *lgk_probability,
                  int *C_genusmat, double *C_unifs, int *C_rboot, int *C_rboot_tax, int *C_rval, 
-                 unsigned int k, size_t n_kmers, size_t ngenus, size_t nlevel, unsigned int max_arraylen, bool try_rc)
+                 unsigned int k, size_t n_kmers, size_t ngenus, size_t nlevel, unsigned int max_arraylen,
+                 size_t max_contrib, bool try_rc)
     : seqs(seqs), rcs(rcs), lgk_probability(lgk_probability), 
       C_genusmat(C_genusmat), C_unifs(C_unifs), C_rboot(C_rboot), C_rboot_tax(C_rboot_tax), C_rval(C_rval), 
-      k(k), n_kmers(n_kmers), ngenus(ngenus), nlevel(nlevel), max_arraylen(max_arraylen), try_rc(try_rc) {}
+      k(k), n_kmers(n_kmers), ngenus(ngenus), nlevel(nlevel), max_arraylen(max_arraylen),
+      max_contrib(max_contrib), try_rc(try_rc) {}
 
   void operator()(std::size_t begin, std::size_t end) {
     size_t i, seqlen;
-    unsigned int boot, booti, arraylen, arraylen_rc;
+    unsigned int boot, booti, arraylen, arraylen_rc, bootlen;
     int max_g, max_g_rc, boot_g;
     int karray[9999];
     int karray_rc[9999];
-    int bootarray[9999/8];
+    int bootpos[9999/8 + 1];
     double *unifs;
     float logp, logp_rc;
     thread_local std::mt19937 tax_rng(std::random_device{}());
+    thread_local float *contrib_buf = NULL;
+    thread_local float *scores_buf = NULL;
+    thread_local size_t buf_cap = 0;
+
+    if(buf_cap < max_contrib || contrib_buf == NULL || scores_buf == NULL) {
+      free(contrib_buf);
+      free(scores_buf);
+      contrib_buf = (float *) malloc(max_contrib * sizeof(float));
+      scores_buf = (float *) malloc(ngenus * sizeof(float));
+      if(contrib_buf == NULL || scores_buf == NULL) {
+        Rcpp::stop("Memory allocation failed.");
+      }
+      buf_cap = max_contrib;
+    }
 
     for(std::size_t j=begin;j<end;j++) {
       seqlen = seqs[j].size();
@@ -196,16 +310,16 @@ struct AssignParallel : public RcppParallel::Worker
         }
         
         C_rval[j] = max_g+1;
-        
+
+        build_contrib(contrib_buf, karray, arraylen, n_kmers, ngenus, lgk_probability);
+        bootlen = arraylen / 8;
         unifs = &C_unifs[j*max_arraylen];
         booti = 0;
         for(boot=0;boot<NBOOT;boot++) {
-          for(i=0;i<(arraylen/8);i++,booti++) {
-            bootarray[i] = karray[(int) (arraylen*unifs[booti])];
+          for(i=0;i<bootlen;i++,booti++) {
+            bootpos[i] = (int)(arraylen * unifs[booti]);
           }
-          // Bootstrap subsamples are not sorted; sort for the same cache benefit.
-          std::sort(bootarray, bootarray + (arraylen/8));
-          boot_g = get_best_genus(bootarray, &logp, (arraylen/8), n_kmers, ngenus, lgk_probability, tax_rng);
+          boot_g = score_boot_contrib(contrib_buf, bootpos, bootlen, ngenus, scores_buf, tax_rng, &logp);
           C_rboot_tax[j*NBOOT+boot] = boot_g+1;
           for(i=0;i<nlevel;i++) {
             if(C_genusmat[boot_g*nlevel+i] == C_genusmat[max_g*nlevel+i]) {
@@ -290,6 +404,7 @@ Rcpp::List C_assign_taxonomy2(std::vector<std::string> seqs, std::vector<std::st
     seqlen = seqs[i].size();
     if((seqlen-k+1) > max_arraylen) { max_arraylen = seqlen-k+1; }
   }
+  size_t max_contrib = ((size_t)max_arraylen) * ngenus;
   
   Rcpp::NumericVector unifs;
   unifs = Rcpp::runif(nseq*NBOOT*(max_arraylen/8));
@@ -310,12 +425,13 @@ Rcpp::List C_assign_taxonomy2(std::vector<std::string> seqs, std::vector<std::st
     }
   }
   
-  AssignParallel assignParallel(seqs, rcs, lgk_probability, C_genusmat, C_unifs, C_rboot, C_rboot_tax, C_rval, k, n_kmers, ngenus, nlevel, max_arraylen, try_rc);
+  AssignParallel assignParallel(seqs, rcs, lgk_probability, C_genusmat, C_unifs, C_rboot, C_rboot_tax, C_rval, k, n_kmers, ngenus, nlevel, max_arraylen, max_contrib, try_rc);
   int INTERRUPT_BLOCK_SIZE=128;
+  int grain_size = (nseq >= 256) ? 4 : 1;
   for(i=0;i<nseq;i+=INTERRUPT_BLOCK_SIZE) {
     j = i+INTERRUPT_BLOCK_SIZE;
     if(j > nseq) { j = nseq; }
-    RcppParallel::parallelFor(i, j, assignParallel, 1);
+    RcppParallel::parallelFor(i, j, assignParallel, grain_size);
     Rcpp::checkUserInterrupt();
   }
   
