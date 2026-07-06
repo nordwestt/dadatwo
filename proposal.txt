@@ -1,0 +1,4 @@
+SSE2 SIMD acceleration of assignTaxonomy inner loop 
+
+AVX-512 / NEON SIMD vectorization of the inner scoring loop could yield a significant speedup on modern CPUs. 
+Our aim would be to target x86-64
