@@ -182,13 +182,6 @@ double kord_dist(uint16_t *kord1, int len1, uint16_t *kord2, int len2, int k);
 double kord_dist_SSEi(uint16_t *kord1, int len1, uint16_t *kord2, int len2, int k);
 ///TEST uint16_t kmer_dist2(uint16_t *kv1, int len1, uint16_t *kv2, int len2, int k);
 
-// methods implemented in taxonomy_simd.cpp
-float score_genus(const float *lgk_v, const int *karray, unsigned int arraylen, float max_logp);
-float score_genus_scalar(const float *lgk_v, const int *karray, unsigned int arraylen, float max_logp);
-#ifdef __x86_64
-float score_genus_avx2(const float *lgk_v, const int *karray, unsigned int arraylen, float max_logp);
-#endif
-
 // methods implemented in pval.cpp
 void b_p_update(B *b, bool greedy, bool detect_singletons);
 double calc_pA(int reads, double E_reads, bool prior);
