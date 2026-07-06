@@ -1,2 +1,8 @@
 PKG_LIBS += $(shell ${R_HOME}/bin/Rscript -e "RcppParallel::RcppParallelLibs()")
 CXX_STD = CXX11
+PKG_CPPFLAGS += -msse2
+PKG_CFLAGS += -msse2
+PKG_CXXFLAGS += -msse2
+
+# Compile taxonomy_simd.cpp with AVX2 without enabling AVX2 globally.
+taxonomy_simd.o: CXXFLAGS += -mavx2

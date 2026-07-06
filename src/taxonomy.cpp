@@ -2,10 +2,18 @@
 #include <Rcpp.h>
 #include <RcppParallel.h>
 #include <random>
-#include <algorithm>
 #define NBOOT 100
   
 using namespace Rcpp;
+
+// Returns 0-3 for ACGT, -1 otherwise
+static inline int tax_nti(char c) {
+  if(c == 'A') return 0;
+  if(c == 'C') return 1;
+  if(c == 'G') return 2;
+  if(c == 'T') return 3;
+  return -1;
+}
 
 // Gets kmer index
 // Returns -1 if non-ACGT base encountered
@@ -14,15 +22,8 @@ int tax_kmer(const char *seq, unsigned int k) {
   int kmer=0;
   
   for(j=0; j<k; j++) {
-    if(seq[j] == 'A') {
-      nti = 0;
-    } else if (seq[j] == 'C') {
-      nti = 1;
-    } else if (seq[j] == 'G') {
-      nti = 2;
-    } else if (seq[j] == 'T') {
-      nti = 3;
-    } else {
+    nti = tax_nti(seq[j]);
+    if(nti < 0) {
       kmer = -1;
       break;
     }
@@ -53,45 +54,45 @@ void tax_kvec(const char *seq, unsigned int k, unsigned char *kvec) {
 
 // Writes all valid (>=0) kmer indices in the provided sequence to karray. Returns number written.
 unsigned int tax_karray(const char *seq, unsigned int k, int *karray) {
-  unsigned int i, j;
-  int kmer;
   unsigned int len = strlen(seq);
-  size_t klen = len - k + 1; // The number of kmers in this sequence
-  
-  for(i=0,j=0;i<klen;i++) {
-    kmer = tax_kmer(&seq[i], k);
-    // Ensure a valid kmer index
-    if(kmer>=0) {
-      karray[j] = kmer;
-      j++;
+  if(len < k) return 0;
+  size_t klen = len - k + 1;
+  unsigned int j = 0;
+  int mask = (1 << (2*k)) - 1;
+  bool can_roll = false;
+  int kmer = 0;
+
+  for(unsigned int i = 0; i < klen; i++) {
+    if(!can_roll) {
+      kmer = tax_kmer(&seq[i], k);
+      can_roll = (kmer >= 0);
+    } else {
+      int in_nti = tax_nti(seq[i + k - 1]);
+      if(in_nti < 0) {
+        can_roll = false;
+        continue;
+      }
+      kmer = ((kmer << 2) | in_nti) & mask;
+    }
+    if(can_roll) {
+      karray[j++] = kmer;
     }
   }
-  std::sort(karray, karray+j);
   return(j);
 }
 
-int get_best_genus(int *karray, float *out_logp, unsigned int arraylen, unsigned int n_kmers, unsigned int ngenus, float *lgk_probability) {
-  unsigned int pos;
+int get_best_genus(int *karray, float *out_logp, unsigned int arraylen, unsigned int n_kmers, unsigned int ngenus, float *lgk_probability, std::mt19937& gen) {
+  unsigned int g;
   float *lgk_v;
-  int kmer, g, max_g = -1;
+  int max_g = -1;
   float logp, max_logp = -FLT_MAX; // Init value to be replaced on first iteration
-  double rv; // Dummy random variable
-  unsigned int nmax=0; // Number of times the current max logp has been seen
-  std::random_device rd;  //Will be used to obtain a seed for the random number engine
-  std::mt19937 gen(rd()); //Standard mersenne_twister_engine seeded with rd()
+  double rv;
+  unsigned int nmax=0;
   std::uniform_real_distribution<> cunif(0.0, 1.0);
   
   for(g=0;g<ngenus;g++) {
     lgk_v = &lgk_probability[g*n_kmers];
-    logp = 0.0;
-
-    // Take the product of the probabilitys -> sum of logs
-    // This is the rate limiting step of the entire assignTaxonomy (on query sets of non-trival size)
-    for(pos=0;pos<arraylen;pos++) {
-      kmer = karray[pos];
-      logp += lgk_v[kmer];
-      if(logp < max_logp) { break; }
-    }
+    logp = score_genus(lgk_v, karray, arraylen, max_logp);
 
     if(max_logp > 0 || logp>max_logp) { // Store if new max
       max_logp = logp;
@@ -149,6 +150,10 @@ struct AssignParallel : public RcppParallel::Worker
     int bootarray[9999/8];
     double *unifs;
     float logp, logp_rc;
+    std::mt19937& tax_rng = []() -> std::mt19937& {
+      thread_local std::mt19937 gen((std::random_device())());
+      return gen;
+    }();
 
     for(std::size_t j=begin;j<end;j++) {
       seqlen = seqs[j].size();
@@ -165,11 +170,11 @@ struct AssignParallel : public RcppParallel::Worker
         arraylen = tax_karray(seqs[j].c_str(), k, karray);
   
         // Find best hit
-        max_g = get_best_genus(karray, &logp, arraylen, n_kmers, ngenus, lgk_probability);
+        max_g = get_best_genus(karray, &logp, arraylen, n_kmers, ngenus, lgk_probability, tax_rng);
         if(try_rc) { // see if rev-comp is a better match to refs
           arraylen_rc = tax_karray(rcs[j].c_str(), k, karray_rc);
           if(arraylen != arraylen_rc) { Rcpp::stop("Discrepancy between forward and RC arraylen."); }
-          max_g_rc = get_best_genus(karray_rc, &logp_rc, arraylen_rc, n_kmers, ngenus, lgk_probability);
+          max_g_rc = get_best_genus(karray_rc, &logp_rc, arraylen_rc, n_kmers, ngenus, lgk_probability, tax_rng);
           if(logp_rc > logp) { // rev-comp is better, replace with it
             max_g = max_g_rc;
             memcpy(karray, karray_rc, arraylen * sizeof(int));
@@ -184,7 +189,7 @@ struct AssignParallel : public RcppParallel::Worker
           for(i=0;i<(arraylen/8);i++,booti++) {
             bootarray[i] = karray[(int) (arraylen*unifs[booti])];
           }
-          boot_g = get_best_genus(bootarray, &logp, (arraylen/8), n_kmers, ngenus, lgk_probability);
+          boot_g = get_best_genus(bootarray, &logp, (arraylen/8), n_kmers, ngenus, lgk_probability, tax_rng);
           C_rboot_tax[j*NBOOT+boot] = boot_g+1; // 1-index for return
           for(i=0;i<nlevel;i++) {
             if(C_genusmat[boot_g*nlevel+i] == C_genusmat[max_g*nlevel+i]) {

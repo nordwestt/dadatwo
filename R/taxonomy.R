@@ -132,7 +132,8 @@ assignTaxonomy <- function(seqs, refFasta, minBoot=50, tryRC=FALSE, outputBootst
     RcppParallel::setThreadOptions(numThreads = 1)
   }
   # Run C assignemnt code
-  assignment <- C_assign_taxonomy2(seqs, rc(seqs), refs, ref.to.genus, tax.mat.int, tryRC, verbose)
+  rcs <- if(tryRC) rc(seqs) else character(0)
+  assignment <- C_assign_taxonomy2(seqs, rcs, refs, ref.to.genus, tax.mat.int, tryRC, verbose)
   # Parse results and return tax consistent with minBoot
   bestHit <- genus.unq[assignment$tax]
   boots <- assignment$boot
