@@ -36,7 +36,7 @@ If TRUE, the reverse-complement of each sequences will be used for classificatio
 sequences than the forward sequence.}
 
 \item{outputBootstraps}{(Optional). Default FALSE.
-If TRUE, bootstrap values will be retained in an integer matrix. A named list containing the assigned taxonomies (named "taxa") 
+If TRUE, bootstrap values will be retained in an integer matrix. A named list containing the assigned taxonomies (named "tax") 
 and the bootstrap values (named "boot") will be returned. Minimum bootstrap confidence filtering still takes place,
 to see full taxonomy set minBoot=0}
 
@@ -58,7 +58,7 @@ A character matrix of assigned taxonomies exceeding the minBoot level of
   taxonomic levels. NA indicates that the sequence was not consistently classified at
   that level at the minBoot threshhold.
   
-  If outputBootstraps is TRUE, a named list containing the assigned taxonomies (named "taxa") 
+  If outputBootstraps is TRUE, a named list containing the assigned taxonomies (named "tax") 
   and the bootstrap values (named "boot") will be returned.
 }
 \description{
